@@ -8,6 +8,9 @@ class Question {
   final String? pythonScriptPath;
   final List<Answer> answers;
   final List<ExternalLink> externalLinks;
+  /// Editor-only: folder label used for grouping questions in the editor UI.
+  /// Has no effect on scenario playback.
+  final String folder;
 
   const Question({
     required this.id,
@@ -16,6 +19,7 @@ class Question {
     this.pythonScriptPath,
     this.answers = const [],
     this.externalLinks = const [],
+    this.folder = '',
   });
 
   factory Question.fromJson(Map<String, dynamic> json) => Question(
@@ -29,6 +33,7 @@ class Question {
         externalLinks: (json['externalLinks'] as List<dynamic>? ?? [])
             .map((e) => ExternalLink.fromJson(e as Map<String, dynamic>))
             .toList(),
+        folder: json['folder'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
@@ -38,6 +43,7 @@ class Question {
         if (pythonScriptPath != null) 'pythonScriptPath': pythonScriptPath,
         'answers': answers.map((a) => a.toJson()).toList(),
         'externalLinks': externalLinks.map((l) => l.toJson()).toList(),
+        if (folder.isNotEmpty) 'folder': folder,
       };
 
   Question copyWith({
@@ -48,6 +54,7 @@ class Question {
     List<Answer>? answers,
     List<ExternalLink>? externalLinks,
     bool clearPythonScript = false,
+    String? folder,
   }) =>
       Question(
         id: id ?? this.id,
@@ -57,5 +64,6 @@ class Question {
             clearPythonScript ? null : (pythonScriptPath ?? this.pythonScriptPath),
         answers: answers ?? this.answers,
         externalLinks: externalLinks ?? this.externalLinks,
+        folder: folder ?? this.folder,
       );
 }

@@ -23,7 +23,7 @@ class ScenarioEditorScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (scenarioId == null) {
-      // New scenario
+      // New scenario — no draft to load
       final now = DateTime.now();
       final blank = Scenario(
         id: 'new-scenario',
@@ -32,28 +32,33 @@ class ScenarioEditorScreen extends ConsumerWidget {
         createdAt: now,
         updatedAt: now,
       );
-      return _EditorBody(initialScenario: blank);
+      return _EditorBody(initialScenario: blank, startDirty: false);
     }
 
-    final scenarioAsync =
-        ref.watch(scenarioByIdProvider(scenarioId!, scenarioVersion!));
-    return scenarioAsync.when(
+    final editAsync = ref.watch(
+        scenarioForEditingProvider(scenarioId!, scenarioVersion!));
+    return editAsync.when(
       loading: () => const LoadingWidget(),
       error: (e, _) => AppErrorWidget(error: e),
-      data: (scenario) {
-        if (scenario == null) {
-          return const Center(child: Text('Scenario not found.'));
-        }
-        return _EditorBody(initialScenario: scenario);
-      },
+      data: (result) => _EditorBody(
+        initialScenario: result.scenario,
+        // If we loaded a draft, the editor starts dirty so the chip shows
+        // immediately and the Save button is enabled.
+        startDirty: result.hasDraft,
+      ),
     );
   }
 }
 
 class _EditorBody extends ConsumerWidget {
   final Scenario initialScenario;
+  /// Whether the editor should start in a dirty (draft) state.
+  final bool startDirty;
 
-  const _EditorBody({required this.initialScenario});
+  const _EditorBody({
+    required this.initialScenario,
+    required this.startDirty,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -61,6 +66,14 @@ class _EditorBody extends ConsumerWidget {
         ref.watch(scenarioEditorProvider(initialScenario));
     final notifier =
         ref.read(scenarioEditorProvider(initialScenario).notifier);
+
+    // On first build, if we loaded a draft, mark the state dirty so the chip
+    // and Save button activate without requiring a user edit first.
+    if (startDirty && !editorState.isDirty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        notifier.markDirtyFromDraft();
+      });
+    }
 
     return CallbackShortcuts(
       bindings: {
@@ -81,17 +94,36 @@ class _EditorBody extends ConsumerWidget {
                   Padding(
                     padding: const EdgeInsets.only(left: 8),
                     child: Chip(
-                      label: const Text('Unsaved'),
+                      avatar: editorState.isDraftSaving
+                          ? SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onTertiaryContainer,
+                              ),
+                            )
+                          : Icon(
+                              Icons.edit_note,
+                              size: 14,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onTertiaryContainer,
+                            ),
+                      label: Text(
+                          editorState.isDraftSaving ? 'Saving…' : 'Draft'),
                       padding: EdgeInsets.zero,
                       labelPadding:
-                          const EdgeInsets.symmetric(horizontal: 8),
+                          const EdgeInsets.symmetric(horizontal: 6),
                       side: BorderSide.none,
                       backgroundColor:
-                          Theme.of(context).colorScheme.errorContainer,
+                          Theme.of(context).colorScheme.tertiaryContainer,
                       labelStyle: TextStyle(
                         color: Theme.of(context)
                             .colorScheme
-                            .onErrorContainer,
+                            .onTertiaryContainer,
                         fontSize: 11,
                       ),
                     ),
@@ -157,6 +189,7 @@ class _EditorBody extends ConsumerWidget {
                 child: _QuestionList(
                   draft: editorState.draft,
                   notifier: notifier,
+                  initialScenario: initialScenario,
                 ),
               ),
             ],
@@ -295,57 +328,469 @@ class _MetaPanelState extends State<_MetaPanel> {
   }
 }
 
-class _QuestionList extends StatelessWidget {
+/// Groups questions by folder and renders them in collapsible sections.
+/// The global order of questions in `draft.questions` is preserved across all
+/// folders; reordering within a folder moves items within their contiguous
+/// block in the global list.
+class _QuestionList extends StatefulWidget {
   final Scenario draft;
   final ScenarioEditor notifier;
+  /// The initial scenario object used as the Riverpod family key for the editor.
+  final Scenario initialScenario;
 
-  const _QuestionList({required this.draft, required this.notifier});
+  const _QuestionList({
+    required this.draft,
+    required this.notifier,
+    required this.initialScenario,
+  });
+
+  @override
+  State<_QuestionList> createState() => _QuestionListState();
+}
+
+class _QuestionListState extends State<_QuestionList> {
+  /// Folders that are currently collapsed; root ('') is always expanded.
+  final Set<String> _collapsed = {};
+
+  // ── Create folder ──────────────────────────────────────────────────────────
+  Future<void> _showCreateFolderDialog(BuildContext context) async {
+    final ctrl = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New Folder'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Folder name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.of(ctx).pop(v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    // A folder only materialises when it has at least one question, so we
+    // just ensure the name is tracked locally — the user can then drag a
+    // question into it, or type it in the question dialog.
+    // If the name is non-empty and not already present, surface a snackbar
+    // hint because we can't create an empty folder in the data model.
+    if (name != null && name.isNotEmpty && context.mounted) {
+      final exists = widget.draft.questions.any((q) => q.folder == name);
+      if (!exists) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Folder "$name" created. Drag a question here to populate it.'),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+        // Pre-expand the folder slot visually (it will appear when a question
+        // is moved into it). No-op on the notifier yet — nothing to save.
+        setState(() => _collapsed.remove(name));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final questionIds = draft.questions.map((q) => q.id).toList();
+    final questions = widget.draft.questions;
+
+    // Build an ordered list of folder names, preserving first-occurrence order.
+    final orderedFolders = <String>[];
+    for (final q in questions) {
+      if (!orderedFolders.contains(q.folder)) {
+        orderedFolders.add(q.folder);
+      }
+    }
+
+    // Toolbar row: section label + "New Folder" button.
+    final toolbar = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+      child: Row(
+        children: [
+          Text(
+            'Questions  (${questions.length})',
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+          ),
+          const Spacer(),
+          TextButton.icon(
+            onPressed: () => _showCreateFolderDialog(context),
+            icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+            label: const Text('New Folder'),
+          ),
+        ],
+      ),
+    );
+
+    if (questions.isEmpty) {
+      return Scaffold(
+        body: Column(
+          children: [
+            toolbar,
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.quiz_outlined,
+                        size: 64,
+                        color: Theme.of(context).colorScheme.outline),
+                    const SizedBox(height: 12),
+                    const Text('No questions yet. Add one below.'),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        floatingActionButton: _buildFab(context),
+      );
+    }
 
     return Scaffold(
-      body: draft.questions.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.quiz_outlined,
-                      size: 64,
-                      color: Theme.of(context).colorScheme.outline),
-                  const SizedBox(height: 12),
-                  const Text('No questions yet. Add one below.'),
-                ],
-              ),
-            )
-          : ReorderableListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: draft.questions.length,
-              onReorderItem: (oldIndex, newIndex) =>
-                  notifier.reorderQuestions(oldIndex, newIndex),
-              itemBuilder: (_, i) {
-                final q = draft.questions[i];
-                return QuestionEditorTile(
-                  key: ValueKey(q.id),
-                  question: q,
-                  allQuestionIds: questionIds,
-                  notifier: notifier,
-                );
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(0, 0, 0, 80),
+        // +1 for the toolbar row at index 0
+        itemCount: orderedFolders.length + 1,
+        itemBuilder: (_, fi) {
+          if (fi == 0) return toolbar;
+          final folder = orderedFolders[fi - 1];
+          final folderQuestions =
+              questions.where((q) => q.folder == folder).toList();
+          final isCollapsed = _collapsed.contains(folder);
+
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _FolderSection(
+              key: ValueKey('folder_$folder'),
+              folderName: folder,
+              questions: folderQuestions,
+              isCollapsed: isCollapsed,
+              onToggleCollapse: () => setState(() {
+                if (isCollapsed) {
+                  _collapsed.remove(folder);
+                } else {
+                  _collapsed.add(folder);
+                }
+              }),
+              onRenameFolder: folder.isEmpty
+                  ? null
+                  : (newName) =>
+                      widget.notifier.renameFolder(folder, newName),
+              onDeleteFolder: folder.isEmpty
+                  ? null
+                  : () => widget.notifier.deleteFolder(folder),
+              // Reorder within this folder: map local → global indices
+              onReorder: (oldLocal, newLocal) {
+                final globalOld =
+                    questions.indexOf(folderQuestions[oldLocal]);
+                final globalNew =
+                    questions.indexOf(folderQuestions[newLocal]);
+                widget.notifier.reorderQuestions(globalOld, globalNew);
               },
+              // Drag-from-another-folder: move question into this folder
+              onDropQuestion: (questionId) =>
+                  widget.notifier.moveQuestionToFolder(questionId, folder),
+              initialScenario: widget.initialScenario,
+              notifier: widget.notifier,
             ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          final preset = await showDialog<Question>(
-            context: context,
-            builder: (_) => const _QuestionPresetDialog(),
           );
-          if (preset != null) {
-            notifier.addQuestion(preset);
-          }
         },
-        icon: const Icon(Icons.add),
-        label: const Text('Add Question'),
+      ),
+      floatingActionButton: _buildFab(context),
+    );
+  }
+
+  Widget _buildFab(BuildContext context) {
+    return FloatingActionButton.extended(
+      onPressed: () async {
+        final preset = await showDialog<Question>(
+          context: context,
+          builder: (_) => const _QuestionPresetDialog(),
+        );
+        if (preset == null || !context.mounted) return;
+        // Add the question to the draft first so the editor dialog can find it.
+        widget.notifier.addQuestion(preset);
+        // Immediately open the editor dialog for the newly-added question.
+        if (context.mounted) {
+          await showDialog<void>(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => QuestionEditorDialog(
+              initialScenario: widget.initialScenario,
+              questionId: preset.id,
+            ),
+          );
+        }
+      },
+      icon: const Icon(Icons.add),
+      label: const Text('Add Question'),
+    );
+  }
+}
+
+/// A collapsible section for one folder ('' = root / no folder).
+/// The header is a [DragTarget] so questions can be dragged from other folders.
+class _FolderSection extends StatefulWidget {
+  final String folderName;
+  final List<Question> questions;
+  final bool isCollapsed;
+  final VoidCallback onToggleCollapse;
+  final void Function(String newName)? onRenameFolder;
+  final VoidCallback? onDeleteFolder;
+  final void Function(int oldIndex, int newIndex) onReorder;
+  /// Called when a question is dragged onto this folder's header.
+  final void Function(String questionId) onDropQuestion;
+  final Scenario initialScenario;
+  final ScenarioEditor notifier;
+
+  const _FolderSection({
+    super.key,
+    required this.folderName,
+    required this.questions,
+    required this.isCollapsed,
+    required this.onToggleCollapse,
+    required this.onRenameFolder,
+    required this.onDeleteFolder,
+    required this.onReorder,
+    required this.onDropQuestion,
+    required this.initialScenario,
+    required this.notifier,
+  });
+
+  @override
+  State<_FolderSection> createState() => _FolderSectionState();
+}
+
+class _FolderSectionState extends State<_FolderSection> {
+  bool _isDragOver = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final isRoot = widget.folderName.isEmpty;
+    final label = isRoot ? 'Ungrouped' : widget.folderName;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Folder header (also a DragTarget) ─────────────────────────────
+        DragTarget<String>(
+          onWillAcceptWithDetails: (details) {
+            // Only accept if the question isn't already in this folder.
+            final q = widget.notifier.state.draft
+                .questionById(details.data);
+            return q != null && q.folder != widget.folderName;
+          },
+          onAcceptWithDetails: (details) {
+            widget.onDropQuestion(details.data);
+            setState(() => _isDragOver = false);
+          },
+          onMove: (_) => setState(() => _isDragOver = true),
+          onLeave: (_) => setState(() => _isDragOver = false),
+          builder: (ctx, candidateData, rejectedData) {
+            final isHovered = candidateData.isNotEmpty || _isDragOver;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              decoration: BoxDecoration(
+                color: isHovered
+                    ? colorScheme.primaryContainer.withValues(alpha: 0.5)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: isHovered
+                    ? Border.all(
+                        color: colorScheme.primary.withValues(alpha: 0.6),
+                        width: 1.5,
+                      )
+                    : null,
+              ),
+              child: InkWell(
+                onTap: widget.onToggleCollapse,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                  child: Row(
+                    children: [
+                      Icon(
+                        isRoot
+                            ? Icons.inbox_outlined
+                            : (widget.isCollapsed
+                                ? Icons.folder
+                                : Icons.folder_open),
+                        size: 18,
+                        color: isRoot
+                            ? colorScheme.outline
+                            : colorScheme.primary,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '$label  (${widget.questions.length})',
+                        style:
+                            Theme.of(context).textTheme.labelLarge?.copyWith(
+                                  color: isRoot
+                                      ? colorScheme.outline
+                                      : colorScheme.primary,
+                                ),
+                      ),
+                      const Spacer(),
+                      if (!isRoot) ...[
+                        IconButton(
+                          icon: const Icon(
+                              Icons.drive_file_rename_outline,
+                              size: 16),
+                          tooltip: 'Rename folder',
+                          onPressed: () => _showRenameDialog(
+                              context, widget.folderName),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.folder_delete_outlined,
+                              size: 16, color: colorScheme.error),
+                          tooltip:
+                              'Remove folder (questions move to Ungrouped)',
+                          onPressed: widget.onDeleteFolder,
+                        ),
+                      ],
+                      Icon(
+                        widget.isCollapsed
+                            ? Icons.keyboard_arrow_right
+                            : Icons.keyboard_arrow_down,
+                        size: 18,
+                        color: colorScheme.outline,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+        // ── Question tiles ─────────────────────────────────────────────────
+        if (!widget.isCollapsed)
+          ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: widget.questions.length,
+            onReorderItem: widget.onReorder,
+            itemBuilder: (_, i) {
+              final q = widget.questions[i];
+              return _DraggableQuestionTile(
+                key: ValueKey(q.id),
+                question: q,
+                initialScenario: widget.initialScenario,
+                notifier: widget.notifier,
+                reorderIndex: i,
+              );
+            },
+          ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  void _showRenameDialog(BuildContext context, String currentName) {
+    final ctrl = TextEditingController(text: currentName);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename Folder'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Folder name',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (_) {
+            widget.onRenameFolder?.call(ctrl.text.trim());
+            Navigator.of(ctx).pop();
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              widget.onRenameFolder?.call(ctrl.text.trim());
+              Navigator.of(ctx).pop();
+            },
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Wraps [QuestionEditorTile] in a [LongPressDraggable] that carries the
+/// question's ID as the drag data. Dropping onto a [_FolderSection] header
+/// moves the question into that folder.
+class _DraggableQuestionTile extends StatelessWidget {
+  final Question question;
+  final Scenario initialScenario;
+  final ScenarioEditor notifier;
+  final int reorderIndex;
+
+  const _DraggableQuestionTile({
+    super.key,
+    required this.question,
+    required this.initialScenario,
+    required this.notifier,
+    required this.reorderIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LongPressDraggable<String>(
+      data: question.id,
+      // Compact ghost shown under the finger while dragging.
+      feedback: Material(
+        elevation: 4,
+        borderRadius: BorderRadius.circular(8),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 320),
+          child: ListTile(
+            dense: true,
+            leading: const Icon(Icons.drag_indicator, size: 18),
+            title: Text(
+              question.title.isEmpty ? question.id : question.title,
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+            ),
+            subtitle: Text(question.id,
+                style: const TextStyle(fontSize: 11)),
+          ),
+        ),
+      ),
+      // Dim the original tile while it is being dragged.
+      childWhenDragging: Opacity(
+        opacity: 0.35,
+        child: QuestionEditorTile(
+          question: question,
+          initialScenario: initialScenario,
+          notifier: notifier,
+          reorderIndex: reorderIndex,
+        ),
+      ),
+      child: QuestionEditorTile(
+        question: question,
+        initialScenario: initialScenario,
+        notifier: notifier,
+        reorderIndex: reorderIndex,
       ),
     );
   }

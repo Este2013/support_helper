@@ -19,76 +19,79 @@ class SessionCardWidget extends ConsumerWidget {
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          session.scenarioName,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () =>
+            context.go('/profile/$profileId/session/${session.id}'),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            session.scenarioName,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleSmall
+                                ?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Chip(
+                          label: Text('v${session.scenarioVersion}'),
+                          padding: EdgeInsets.zero,
+                          labelPadding:
+                              const EdgeInsets.symmetric(horizontal: 6),
+                          materialTapTargetSize:
+                              MaterialTapTargetSize.shrinkWrap,
+                          side: BorderSide.none,
+                          backgroundColor: colorScheme.secondaryContainer,
+                          labelStyle: TextStyle(
+                            color: colorScheme.onSecondaryContainer,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        _StatusChip(isActive: isActive),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${session.history.length} answer${session.history.length == 1 ? '' : 's'}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _formatDate(session.updatedAt),
                           style: Theme.of(context)
                               .textTheme
-                              .titleSmall
-                              ?.copyWith(fontWeight: FontWeight.bold),
+                              .bodySmall
+                              ?.copyWith(
+                                color: colorScheme.outline,
+                              ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Chip(
-                        label: Text('v${session.scenarioVersion}'),
-                        padding: EdgeInsets.zero,
-                        labelPadding:
-                            const EdgeInsets.symmetric(horizontal: 6),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        side: BorderSide.none,
-                        backgroundColor: colorScheme.secondaryContainer,
-                        labelStyle: TextStyle(
-                          color: colorScheme.onSecondaryContainer,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      _StatusChip(isActive: isActive),
-                      const SizedBox(width: 8),
-                      Text(
-                        '${session.history.length} answer${session.history.length == 1 ? '' : 's'}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _formatDate(session.updatedAt),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: colorScheme.outline,
-                            ),
-                      ),
-                    ],
-                  ),
-                ],
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: Icon(Icons.delete_outline,
-                  color: colorScheme.error, size: 20),
-              tooltip: 'Delete session',
-              onPressed: () => _deleteSession(context, ref),
-            ),
-            const SizedBox(width: 4),
-            FilledButton.tonal(
-              onPressed: () =>
-                  context.go('/profile/$profileId/session/${session.id}'),
-              child: Text(isActive ? 'Resume' : 'Review'),
-            ),
-          ],
+              const SizedBox(width: 8),
+              IconButton(
+                icon: Icon(Icons.delete_outline,
+                    color: colorScheme.error, size: 20),
+                tooltip: 'Delete session',
+                onPressed: () => _deleteSession(context, ref),
+              ),
+            ],
+          ),
         ),
       ),
     );
