@@ -5,7 +5,9 @@
       "Bash(flutter pub add:*)",
       "Bash(dart run build_runner:*)",
       "Bash(flutter analyze:*)",
-      "Bash(flutter build:*)"
+      "Bash(flutter build:*)",
+      "Bash(findstr /i \"uuid crypto\" \"C:\\\\PROJECTS\\\\support_helper\\\\pubspec.yaml\")",
+      "Bash(findstr:*)"
     ]
   }
 }

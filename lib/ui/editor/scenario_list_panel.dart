@@ -138,7 +138,7 @@ class ScenarioListPanel extends ConsumerWidget {
 
 // ── Scenario group card ──────────────────────────────────────────────────────
 
-class _ScenarioGroup extends StatelessWidget {
+class _ScenarioGroup extends StatefulWidget {
   final String scenarioId;
   final List<({Scenario scenario, bool hasDraft, bool publishedExists})> versions;
   final void Function(Scenario) onDeletePublished;
@@ -152,15 +152,44 @@ class _ScenarioGroup extends StatelessWidget {
   });
 
   @override
+  State<_ScenarioGroup> createState() => _ScenarioGroupState();
+}
+
+class _ScenarioGroupState extends State<_ScenarioGroup> {
+  bool _showAllVersions = false;
+
+  /// Compares two version strings numerically segment-by-segment.
+  /// Returns > 0 if [a] is newer, < 0 if [b] is newer, 0 if equal.
+  static int _compareVersions(String a, String b) {
+    final pa = a.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final pb = b.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final len = pa.length > pb.length ? pa.length : pb.length;
+    for (var i = 0; i < len; i++) {
+      final va = i < pa.length ? pa[i] : 0;
+      final vb = i < pb.length ? pb[i] : 0;
+      if (va != vb) return va - vb;
+    }
+    return 0;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // Use the first entry's name as the group title (all versions share a name).
-    final groupName = versions.first.scenario.name;
+    final groupName = widget.versions.first.scenario.name;
+
+    // Sort descending — newest first.
+    final sorted = [...widget.versions]..sort(
+        (a, b) => _compareVersions(b.scenario.version, a.scenario.version));
+
+    final latest = sorted.first;
+    final older = sorted.skip(1).toList();
+    final hasOlder = older.isNotEmpty;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Group header ──────────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text(
@@ -171,11 +200,49 @@ class _ScenarioGroup extends StatelessWidget {
                   ?.copyWith(fontWeight: FontWeight.bold),
             ),
           ),
-          ...versions.map((entry) => _ScenarioVersionTile(
-                entry: entry,
-                onDeletePublished: onDeletePublished,
-                onDeleteDraft: onDeleteDraft,
-              )),
+          // ── Latest version ────────────────────────────────────────────────
+          _ScenarioVersionTile(
+            entry: latest,
+            onDeletePublished: widget.onDeletePublished,
+            onDeleteDraft: widget.onDeleteDraft,
+          ),
+          // ── Older versions (collapsed by default) ─────────────────────────
+          if (hasOlder) ...[
+            InkWell(
+              onTap: () => setState(() => _showAllVersions = !_showAllVersions),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 2, 12, 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _showAllVersions
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.outline,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _showAllVersions
+                          ? 'Hide older versions'
+                          : '${older.length} older version${older.length == 1 ? '' : 's'}',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                            color: Theme.of(context).colorScheme.outline,
+                          ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_showAllVersions)
+              ...older.map((entry) => _ScenarioVersionTile(
+                    entry: entry,
+                    onDeletePublished: widget.onDeletePublished,
+                    onDeleteDraft: widget.onDeleteDraft,
+                  )),
+          ] else
+            const SizedBox(height: 4),
         ],
       ),
     );
@@ -184,7 +251,7 @@ class _ScenarioGroup extends StatelessWidget {
 
 // ── Single version row ───────────────────────────────────────────────────────
 
-class _ScenarioVersionTile extends StatelessWidget {
+class _ScenarioVersionTile extends ConsumerWidget {
   final ({Scenario scenario, bool hasDraft, bool publishedExists}) entry;
   final void Function(Scenario) onDeletePublished;
   final void Function(Scenario) onDeleteDraft;
@@ -195,8 +262,60 @@ class _ScenarioVersionTile extends StatelessWidget {
     required this.onDeleteDraft,
   });
 
+  String _editorPath(Scenario s) =>
+      '/editor/${Uri.encodeComponent(s.id)}/${Uri.encodeComponent(s.version)}';
+
+  /// Tapping when both a published file AND a draft exist: ask the user
+  /// whether to resume the draft or start fresh from the published version.
+  Future<void> _handleTap(BuildContext context, WidgetRef ref) async {
+    final s = entry.scenario;
+    // Orphan draft or no draft — go straight in.
+    if (!entry.hasDraft || !entry.publishedExists) {
+      context.go(_editorPath(s));
+      return;
+    }
+
+    // Both exist — show the choice dialog.
+    final resume = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Unsaved Draft Found'),
+        content: Text(
+          '"${s.name}" v${s.version} has an unsaved draft.\n\n'
+          'Would you like to resume where you left off, or start fresh from the last published version?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null), // cancel
+            child: const Text('Cancel'),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.restart_alt, size: 16),
+            label: const Text('Start Fresh'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.edit_note, size: 16),
+            label: const Text('Resume Draft'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (resume == null || !context.mounted) return;
+
+    if (!resume) {
+      // Discard the draft, then open the published version.
+      final repo = ref.read(scenarioRepositoryProvider);
+      await repo.deleteDraft(s.id, s.version);
+      ref.invalidate(scenarioListWithStatusProvider);
+    }
+    if (context.mounted) context.go(_editorPath(s));
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final s = entry.scenario;
     final colorScheme = Theme.of(context).colorScheme;
     final isOrphanDraft = !entry.publishedExists;
@@ -206,7 +325,6 @@ class _ScenarioVersionTile extends StatelessWidget {
         children: [
           Text('v${s.version}'),
           const SizedBox(width: 8),
-          // Draft badge
           if (entry.hasDraft)
             Chip(
               label: Text(isOrphanDraft ? 'Unpublished Draft' : 'Draft'),
@@ -233,20 +351,17 @@ class _ScenarioVersionTile extends StatelessWidget {
         children: [
           IconButton(
             icon: const Icon(Icons.edit_outlined, size: 18),
-            onPressed: () => context.go(
-                '/editor/${Uri.encodeComponent(s.id)}/${Uri.encodeComponent(s.version)}'),
+            onPressed: () => _handleTap(context, ref),
             tooltip: isOrphanDraft ? 'Continue editing draft' : 'Edit',
           ),
           // Discard-draft button — only when a draft exists alongside a
-          // published file (orphan drafts are deleted via the delete button).
+          // published file (orphan drafts use the delete button instead).
           if (entry.hasDraft && entry.publishedExists)
             IconButton(
               icon: Icon(Icons.undo, size: 18, color: colorScheme.tertiary),
               tooltip: 'Discard draft (revert to published)',
               onPressed: () => onDeleteDraft(s),
             ),
-          // Delete button — deletes the published file (and draft).
-          // For orphan drafts this deletes the draft entirely.
           IconButton(
             icon: Icon(Icons.delete_outline,
                 size: 18, color: colorScheme.error),
@@ -257,8 +372,7 @@ class _ScenarioVersionTile extends StatelessWidget {
           ),
         ],
       ),
-      onTap: () => context.go(
-          '/editor/${Uri.encodeComponent(s.id)}/${Uri.encodeComponent(s.version)}'),
+      onTap: () => _handleTap(context, ref),
     );
   }
 }

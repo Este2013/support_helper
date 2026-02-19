@@ -70,10 +70,8 @@ class Scenario {
   String? validate() {
     if (id.trim().isEmpty) return 'Scenario ID cannot be empty';
     if (name.trim().isEmpty) return 'Scenario name cannot be empty';
-    if (version.trim().isEmpty) return 'Version cannot be empty';
     final ids = questions.map((q) => q.id).toList();
-    final uniqueIds = ids.toSet();
-    if (ids.length != uniqueIds.length) return 'Duplicate question IDs found';
+    if (ids.length != ids.toSet().length) return 'Duplicate question IDs found';
     return null;
   }
 

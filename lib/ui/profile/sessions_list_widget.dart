@@ -141,13 +141,56 @@ class _ScenarioPickerDialog extends StatefulWidget {
 class _ScenarioPickerDialogState extends State<_ScenarioPickerDialog> {
   String _search = '';
 
+  /// Compares two version strings numerically segment-by-segment.
+  /// Returns > 0 if [a] is newer, < 0 if [b] is newer, 0 if equal.
+  static int _compareVersions(String a, String b) {
+    final pa = a.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final pb = b.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final len = pa.length > pb.length ? pa.length : pb.length;
+    for (var i = 0; i < len; i++) {
+      final va = i < pa.length ? pa[i] : 0;
+      final vb = i < pb.length ? pb[i] : 0;
+      if (va != vb) return va.compareTo(vb);
+    }
+    return 0;
+  }
+
+  /// Groups all scenarios by id, sorts each group newest-first,
+  /// then sorts groups alphabetically by name.
+  List<List<Scenario>> _groupScenarios(List<Scenario> all) {
+    final map = <String, List<Scenario>>{};
+    for (final s in all) {
+      map.putIfAbsent(s.id, () => []).add(s);
+    }
+    return map.values.map((versions) {
+      versions.sort((a, b) => _compareVersions(b.version, a.version));
+      return versions;
+    }).toList()
+      ..sort((a, b) => a.first.name.compareTo(b.first.name));
+  }
+
+  /// Opens a version-chooser dialog, then closes this dialog with the choice.
+  Future<void> _pickVersion(
+      BuildContext context, List<Scenario> versions) async {
+    final chosen = await showDialog<Scenario>(
+      context: context,
+      builder: (_) => _VersionPickerDialog(versions: versions),
+    );
+    if (chosen != null && context.mounted) {
+      Navigator.of(context).pop(chosen);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final groups = _groupScenarios(widget.scenarios);
+
     final filtered = _search.isEmpty
-        ? widget.scenarios
-        : widget.scenarios
-            .where((s) =>
-                s.name.toLowerCase().contains(_search.toLowerCase()))
+        ? groups
+        : groups
+            .where((g) =>
+                g.first.name.toLowerCase().contains(_search.toLowerCase()))
             .toList();
 
     return AlertDialog(
@@ -173,16 +216,115 @@ class _ScenarioPickerDialogState extends State<_ScenarioPickerDialog> {
                 shrinkWrap: true,
                 itemCount: filtered.length,
                 itemBuilder: (_, i) {
-                  final s = filtered[i];
+                  final group = filtered[i];
+                  final latest = group.first;
                   return ListTile(
-                    title: Text(s.name),
-                    subtitle: Text('v${s.version} • ${s.questions.length} questions'),
+                    title: Text(latest.name),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('v${latest.version}'),
+                        if (group.length > 1)
+                          GestureDetector(
+                            onTap: () => _pickVersion(context, group),
+                            child: Text(
+                              '${group.length} versions available',
+                              style: TextStyle(
+                                color: colorScheme.primary,
+                                fontSize: 12,
+                                decoration: TextDecoration.underline,
+                                decorationColor: colorScheme.primary,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                     trailing: const Icon(Icons.arrow_forward_ios, size: 14),
-                    onTap: () => Navigator.of(context).pop(s),
+                    // Tapping the tile always picks the latest version.
+                    onTap: () => Navigator.of(context).pop(latest),
                   );
                 },
               ),
             ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
+
+/// A small dialog listing all available versions of a scenario so the user
+/// can deliberately pick one other than the latest.
+class _VersionPickerDialog extends StatelessWidget {
+  final List<Scenario> versions; // already sorted newest-first
+
+  const _VersionPickerDialog({required this.versions});
+
+  @override
+  Widget build(BuildContext context) {
+    final name = versions.first.name;
+    return AlertDialog(
+      title: Text(name),
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Choose a version to use for this session:',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            ...versions.asMap().entries.map((entry) {
+              final isLatest = entry.key == 0;
+              final s = entry.value;
+              return ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.history,
+                  size: 18,
+                  color: isLatest
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.outline,
+                ),
+                title: Text(
+                  'v${s.version}',
+                  style: TextStyle(
+                    fontWeight:
+                        isLatest ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                subtitle: s.author.isNotEmpty ? Text(s.author) : null,
+                trailing: isLatest
+                    ? Chip(
+                        label: const Text('latest'),
+                        padding: EdgeInsets.zero,
+                        labelPadding:
+                            const EdgeInsets.symmetric(horizontal: 6),
+                        side: BorderSide.none,
+                        backgroundColor: Theme.of(context)
+                            .colorScheme
+                            .primaryContainer,
+                        labelStyle: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onPrimaryContainer,
+                        ),
+                      )
+                    : null,
+                onTap: () => Navigator.of(context).pop(s),
+              );
+            }),
           ],
         ),
       ),

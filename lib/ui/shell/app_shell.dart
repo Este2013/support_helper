@@ -2,19 +2,39 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../providers/tab_providers.dart';
+import '../home/home_screen.dart';
+import '../editor/editor_shell.dart';
 
-class AppShell extends ConsumerWidget {
+class AppShell extends ConsumerStatefulWidget {
+  /// The child widget provided by GoRouter for the currently matched route.
   final Widget child;
 
   const AppShell({super.key, required this.child});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AppShell> createState() => _AppShellState();
+}
+
+class _AppShellState extends ConsumerState<AppShell> {
+  static const _homeIndex = 0;
+  static const _editorIndex = 1;
+
+  @override
+  Widget build(BuildContext context) {
     final tabs = ref.watch(openTabsProvider);
     final location = GoRouterState.of(context).uri.toString();
 
     int navIndex = 0;
     if (location.startsWith('/editor')) navIndex = 1;
+
+    // Whether we are on a persistent top-level tab vs a dynamic sub-route.
+    final bool isHome = location == '/';
+    final bool isEditorList = location == '/editor';
+    // Sub-routes of /editor (new, :id/:version) go through GoRouter's child.
+    final bool isEditorSub =
+        location.startsWith('/editor/');
+    // Profile / session routes.
+    final bool isProfile = location.startsWith('/profile');
 
     return Scaffold(
       body: Row(
@@ -45,7 +65,28 @@ class AppShell extends ConsumerWidget {
               children: [
                 if (tabs.isNotEmpty)
                   _ProfileTabBar(tabs: tabs, location: location),
-                Expanded(child: child),
+                Expanded(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // ── Home (persistent, always in tree) ────────────────
+                      Offstage(
+                        offstage: !isHome,
+                        child: const _KeepAliveView(child: HomeScreen()),
+                      ),
+                      // ── Editor list panel (persistent, always in tree) ───
+                      // Hidden when a sub-editor route or profile is active,
+                      // but never destroyed so the list scroll is preserved.
+                      Offstage(
+                        offstage: !isEditorList,
+                        child: const _KeepAliveView(child: EditorShell()),
+                      ),
+                      // ── GoRouter child: editor sub-routes + profile ───────
+                      // These are rendered on top when active.
+                      if (isEditorSub || isProfile) widget.child,
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
@@ -54,6 +95,30 @@ class AppShell extends ConsumerWidget {
     );
   }
 }
+
+/// Wraps a widget with [AutomaticKeepAliveClientMixin] so it is never
+/// discarded by the [IndexedStack] when its slot is not active.
+class _KeepAliveView extends StatefulWidget {
+  final Widget child;
+  const _KeepAliveView({required this.child});
+
+  @override
+  State<_KeepAliveView> createState() => _KeepAliveViewState();
+}
+
+class _KeepAliveViewState extends State<_KeepAliveView>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // required by mixin
+    return widget.child;
+  }
+}
+
+// ── Profile tab bar ──────────────────────────────────────────────────────────
 
 class _ProfileTabBar extends ConsumerWidget {
   final List<OpenTab> tabs;
@@ -74,13 +139,16 @@ class _ProfileTabBar extends ConsumerWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: tabs.map((tab) {
-                  final isActive = location.startsWith('/profile/${tab.profileId}');
+                  final isActive =
+                      location.startsWith('/profile/${tab.profileId}');
                   return _ProfileTab(
                     tab: tab,
                     isActive: isActive,
                     onTap: () => context.go('/profile/${tab.profileId}'),
                     onClose: () {
-                      ref.read(openTabsProvider.notifier).closeTab(tab.profileId);
+                      ref
+                          .read(openTabsProvider.notifier)
+                          .closeTab(tab.profileId);
                       if (isActive) context.go('/');
                     },
                   );

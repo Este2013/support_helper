@@ -4,7 +4,6 @@ import 'package:markdown_editor_plus/markdown_editor_plus.dart';
 import '../../data/models/profile/customer_profile.dart';
 import '../../providers/profile_providers.dart';
 import '../../providers/tab_providers.dart';
-import '../shared/markdown_view.dart';
 
 class ProfileHeaderWidget extends ConsumerStatefulWidget {
   final CustomerProfile profile;
@@ -18,7 +17,9 @@ class ProfileHeaderWidget extends ConsumerStatefulWidget {
 
 class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
   bool _editingName = false;
-  bool _editingNotes = false;
+  /// True once the user has modified the notes controller text.
+  /// Drives visibility of the Save / Cancel row.
+  bool _notesDirty = false;
   late TextEditingController _nameCtrl;
   late TextEditingController _notesCtrl;
 
@@ -27,6 +28,12 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.profile.name);
     _notesCtrl = TextEditingController(text: widget.profile.notes);
+    _notesCtrl.addListener(_onNotesChanged);
+  }
+
+  void _onNotesChanged() {
+    final dirty = _notesCtrl.text != widget.profile.notes;
+    if (dirty != _notesDirty) setState(() => _notesDirty = dirty);
   }
 
   @override
@@ -37,6 +44,8 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
     }
     if (oldWidget.profile.notes != widget.profile.notes) {
       _notesCtrl.text = widget.profile.notes;
+      // Reset dirty flag — the external update is now the baseline.
+      setState(() => _notesDirty = false);
     }
   }
 
@@ -68,7 +77,7 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
   Future<void> _saveNotes() async {
     final notes = _notesCtrl.text;
     if (notes == widget.profile.notes) {
-      setState(() => _editingNotes = false);
+      setState(() => _notesDirty = false);
       return;
     }
     final repo = ref.read(profileRepositoryProvider);
@@ -77,7 +86,9 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
     await repo.save(updated);
     ref.invalidate(profileByIdProvider(widget.profile.id));
     ref.invalidate(profileListProvider);
-    setState(() => _editingNotes = false);
+    // _notesDirty will be cleared by didUpdateWidget when the new profile
+    // propagates back, but clear it immediately for snappy UI feedback.
+    setState(() => _notesDirty = false);
   }
 
   @override
@@ -135,18 +146,18 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
             ],
           ),
           const SizedBox(height: 8),
-          // Notes
-          if (_editingNotes) ...[
-            SizedBox(
-              height: 200,
-              child: MarkdownAutoPreview(
-                controller: _notesCtrl,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  hintText: 'Customer notes (markdown)...',
-                ),
-              ),
+          // Notes — always show MarkdownAutoPreview so the first click
+          // immediately enters edit mode (the widget manages its own
+          // preview ↔ edit toggle internally via FocusableActionDetector).
+          MarkdownAutoPreview(
+            controller: _notesCtrl,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              hintText: 'Customer notes (markdown)...',
+              contentPadding: EdgeInsets.all(12),
             ),
+          ),
+          if (_notesDirty) ...[
             const SizedBox(height: 8),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
@@ -154,7 +165,7 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
                 TextButton(
                   onPressed: () {
                     _notesCtrl.text = widget.profile.notes;
-                    setState(() => _editingNotes = false);
+                    // _onNotesChanged listener will clear _notesDirty.
                   },
                   child: const Text('Cancel'),
                 ),
@@ -162,30 +173,6 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
                 FilledButton(
                     onPressed: _saveNotes, child: const Text('Save Notes')),
               ],
-            ),
-          ] else ...[
-            InkWell(
-              onTap: () => setState(() => _editingNotes = true),
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: widget.profile.notes.trim().isEmpty
-                    ? Row(
-                        children: [
-                          Icon(Icons.note_add_outlined,
-                              size: 16,
-                              color: Theme.of(context).colorScheme.outline),
-                          const SizedBox(width: 4),
-                          Text(
-                            'Add notes...',
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.outline,
-                            ),
-                          ),
-                        ],
-                      )
-                    : MarkdownView(data: widget.profile.notes),
-              ),
             ),
           ],
         ],

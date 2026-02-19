@@ -49,20 +49,17 @@ class ScenarioEditor extends _$ScenarioEditor {
   /// Debounce timer for auto-saving the draft file.
   Timer? _draftTimer;
 
-  /// The id+version under which the draft was last successfully written.
-  /// Used to detect when the scenario id/version has been renamed between
-  /// debounce ticks so we can delete the old draft file instead of leaving
-  /// orphans behind.
-  String? _lastDraftId;
-  String? _lastDraftVersion;
+  /// Whether the patch version has already been bumped this session.
+  /// Prevents double-bumping on subsequent edits.
+  bool _versionBumped = false;
 
   @override
   ScenarioEditorState build(Scenario initialScenario) {
     // Cancel any pending draft write when the provider is disposed.
     ref.onDispose(() => _draftTimer?.cancel());
-    // Seed the "last known" identity from the scenario we opened with.
-    _lastDraftId = initialScenario.id;
-    _lastDraftVersion = initialScenario.version;
+    // If we opened with a draft already loaded, consider the version already
+    // bumped so we don't increment it again on the next keystroke.
+    _versionBumped = false;
     return ScenarioEditorState(draft: initialScenario);
   }
 
@@ -70,15 +67,39 @@ class ScenarioEditor extends _$ScenarioEditor {
 
   // ── Internal helpers ───────────────────────────────────────────────────────
 
+  /// Increments the patch segment of a semver string `major.minor.patch`.
+  /// Falls back gracefully for non-semver strings (appends `.1`).
+  static String _bumpPatch(String version) {
+    final parts = version.split('.');
+    if (parts.length == 3) {
+      final patch = int.tryParse(parts[2]) ?? 0;
+      return '${parts[0]}.${parts[1]}.${patch + 1}';
+    }
+    if (parts.length == 2) return '${parts[0]}.${parts[1]}.1';
+    return '$version.1';
+  }
+
   /// Marks the draft dirty and schedules a debounced draft file write.
+  /// On the very first edit of a previously-published scenario (startDirty
+  /// was false when the editor opened), bumps the patch version once.
   void _markDirty(Scenario newDraft) {
+    Scenario draft = newDraft;
+    if (!_versionBumped && !state.isDirty) {
+      _versionBumped = true;
+      draft = draft.copyWith(version: _bumpPatch(draft.version));
+    }
     state = state.copyWith(
-      draft: newDraft,
+      draft: draft,
       isDirty: true,
       clearValidationError: true,
     );
     _scheduleDraftSave();
   }
+
+  /// Whether we have written the draft at least once this session.
+  /// Used to invalidate the list provider the first time so new scenarios
+  /// (which have no published file) appear immediately in the scenario list.
+  bool _draftWrittenOnce = false;
 
   /// Debounces draft persistence: waits 800 ms after the last change.
   void _scheduleDraftSave() {
@@ -88,20 +109,15 @@ class ScenarioEditor extends _$ScenarioEditor {
 
   Future<void> _writeDraft() async {
     state = state.copyWith(isDraftSaving: true);
-    final current = state.draft;
     try {
-      // If the scenario id or version changed since the last write, delete
-      // the old draft file first — otherwise we accumulate one orphan per
-      // keystroke as the user edits the ID field.
-      final idChanged = _lastDraftId != null && _lastDraftId != current.id;
-      final versionChanged =
-          _lastDraftVersion != null && _lastDraftVersion != current.version;
-      if (idChanged || versionChanged) {
-        await _repo.deleteDraft(_lastDraftId!, _lastDraftVersion!);
+      await _repo.saveDraft(state.draft);
+      // On the first write, refresh the scenario list so that orphan drafts
+      // (brand-new scenarios never yet published) appear immediately without
+      // requiring an app restart.
+      if (!_draftWrittenOnce) {
+        _draftWrittenOnce = true;
+        ref.invalidate(scenarioListWithStatusProvider);
       }
-      await _repo.saveDraft(current);
-      _lastDraftId = current.id;
-      _lastDraftVersion = current.version;
     } finally {
       state = state.copyWith(isDraftSaving: false);
     }
@@ -113,24 +129,35 @@ class ScenarioEditor extends _$ScenarioEditor {
   /// editor was opened and a pre-existing draft was loaded as the initial state.
   void markDirtyFromDraft() {
     if (state.isDirty) return; // already dirty, nothing to do
+    // Draft was created in a previous session — version already bumped then.
+    _versionBumped = true;
     state = state.copyWith(isDirty: true);
   }
 
   // ── Public mutation API ────────────────────────────────────────────────────
 
   void updateMeta({
-    String? id,
     String? name,
     String? description,
-    String? version,
     String? author,
   }) {
     _markDirty(state.draft.copyWith(
-      id: id,
       name: name,
       description: description,
-      version: version,
       author: author,
+      updatedAt: DateTime.now(),
+    ));
+  }
+
+  /// Updates the version string explicitly (called when the user edits the
+  /// Major or Minor fields). Marks [_versionBumped] so the automatic patch
+  /// increment does not fire on top of the user's intentional change.
+  void updateVersion(String version) {
+    // Treat a manual version edit the same as "already bumped" so _markDirty
+    // does not increment the patch a second time.
+    _versionBumped = true;
+    _markDirty(state.draft.copyWith(
+      version: version,
       updatedAt: DateTime.now(),
     ));
   }
@@ -257,20 +284,7 @@ class ScenarioEditor extends _$ScenarioEditor {
     }
     state = state.copyWith(isSaving: true);
     try {
-      // If the id/version was renamed while the timer was pending, the old
-      // draft file still exists under _lastDraftId/_lastDraftVersion —
-      // delete it before publishing so no orphan is left behind.
-      final current = state.draft;
-      if (_lastDraftId != null &&
-          (_lastDraftId != current.id ||
-              _lastDraftVersion != current.version)) {
-        await _repo.deleteDraft(_lastDraftId!, _lastDraftVersion!);
-      }
-      // repo.save() writes the published file and deletes the draft at the
-      // current id/version.
-      await _repo.save(current);
-      _lastDraftId = current.id;
-      _lastDraftVersion = current.version;
+      await _repo.save(state.draft);
       ref.invalidate(scenarioListProvider);
       ref.invalidate(scenarioListWithStatusProvider);
       state = state.copyWith(
