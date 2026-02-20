@@ -4,6 +4,7 @@ import '../data/models/profile/session_history_entry.dart';
 import '../data/models/scenario/answer_destination.dart';
 import '../data/repositories/profile_repository.dart';
 import 'profile_providers.dart';
+import 'settings_provider.dart';
 
 part 'session_providers.g.dart';
 
@@ -126,5 +127,24 @@ class ActiveSession extends _$ActiveSession {
 
   Future<void> _persist(ScenarioSession session) async {
     await _repo.upsertSession(profileId, session);
+    // Best-effort server push when profile sync is enabled and role is editor.
+    _pushProfile();
+  }
+
+  /// Reads the full updated profile from disk and pushes it to the server.
+  /// Fire-and-forget — failures are silently ignored (session progress is
+  /// already safely stored locally).
+  Future<void> _pushProfile() async {
+    final settings = ref.read(appSettingsNotifierProvider).valueOrNull;
+    if (settings == null || !settings.hasServer ||
+        !settings.syncProfilesEnabled || !settings.canPush) return;
+    try {
+      final syncService = ref.read(profileSyncServiceProvider);
+      if (syncService == null) return;
+      final profile = await _repo.getById(profileId);
+      if (profile != null) await syncService.push(profile);
+    } catch (_) {
+      // Silently ignore — session is already saved locally.
+    }
   }
 }

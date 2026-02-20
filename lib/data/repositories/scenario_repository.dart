@@ -1,10 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
+import '../datasources/scenario_data_source.dart';
 import '../models/scenario/scenario.dart';
 import '../services/storage_service.dart';
 
-class ScenarioRepository {
+/// Local-filesystem implementation of [ScenarioDataSource].
+/// Uses `dart:io` to read/write JSON files under the app support directory.
+/// Not available on web — use a remote data source there instead.
+class ScenarioRepository implements ScenarioDataSource {
   final StorageService _storage;
 
   ScenarioRepository(this._storage);

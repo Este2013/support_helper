@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../data/models/profile/customer_profile.dart';
 import '../../data/models/profile/scenario_session.dart';
+import '../../data/models/scenario/scenario.dart' show ScenarioSource;
 import '../../providers/profile_providers.dart';
 import '../../providers/tab_providers.dart';
 import '../shared/confirm_dialog.dart';
@@ -40,9 +41,27 @@ class ProfileListTile extends ConsumerWidget {
             ),
           ),
         ),
-        title: Text(
-          profile.name,
-          style: const TextStyle(fontWeight: FontWeight.w600),
+        title: Row(
+          children: [
+            Flexible(
+              child: Text(
+                profile.name,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (profile.source == ScenarioSource.remote) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message: 'Synced from server',
+                child: Icon(
+                  Icons.cloud_outlined,
+                  size: 14,
+                  color: Theme.of(context).colorScheme.secondary,
+                ),
+              ),
+            ],
+          ],
         ),
         subtitle: Row(
           children: [

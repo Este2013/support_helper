@@ -7,9 +7,11 @@ import '../../data/models/scenario/answer.dart';
 import '../../data/models/scenario/answer_destination.dart';
 import '../../data/models/scenario/question.dart';
 import '../../data/models/scenario/scenario.dart';
+import '../../data/repositories/scenario_repository.dart';
 import '../../data/services/file_import_export_service.dart';
 import '../../providers/editor_providers.dart';
 import '../../providers/scenario_providers.dart';
+import '../../providers/settings_provider.dart';
 import '../shared/loading_widget.dart';
 import '../shared/error_widget.dart';
 import 'question_editor_tile.dart';
@@ -67,6 +69,8 @@ class _EditorBody extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final editorState = ref.watch(scenarioEditorProvider(initialScenario));
     final notifier = ref.read(scenarioEditorProvider(initialScenario).notifier);
+    final settings = ref.watch(appSettingsNotifierProvider).valueOrNull;
+    final canPublish = settings?.hasServer == true && settings?.canPush == true;
 
     // On first build, if we loaded a draft, mark the state dirty so the chip
     // and Save button activate without requiring a user edit first.
@@ -77,7 +81,12 @@ class _EditorBody extends ConsumerWidget {
     }
 
     return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => notifier.save()},
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): () => _doSave(context, ref, notifier),
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true, shift: true): () {
+          if (canPublish) _doPublish(context, ref, notifier);
+        },
+      },
       child: Focus(
         autofocus: true,
         child: Scaffold(
@@ -108,19 +117,45 @@ class _EditorBody extends ConsumerWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                   child: Text(editorState.validationError!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ),
-              TextButton.icon(onPressed: editorState.isSaving ? null : () => _export(context, ref, editorState.draft), icon: const Icon(Icons.upload_file, size: 16), label: const Text('Export')),
-              FilledButton.icon(
-                onPressed: editorState.isSaving
-                    ? null
-                    : () async {
-                        final ok = await notifier.save();
-                        if (ok && context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Scenario saved.')));
-                        }
-                      },
-                icon: editorState.isSaving ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.save, size: 16),
-                label: const Text('Save'),
+              TextButton.icon(
+                onPressed: editorState.isBusy ? null : () => _export(context, ref, editorState.draft),
+                icon: const Icon(Icons.upload_file, size: 16),
+                label: const Text('Export'),
               ),
+              // When a server is connected with editor role, show two buttons:
+              //   [Save]  — local-only  (Ctrl+S)
+              //   [Publish ↑]  — save + push to server  (Ctrl+Shift+S)
+              // Otherwise show a single [Save] button.
+              if (canPublish) ...[
+                OutlinedButton.icon(
+                  onPressed: editorState.isBusy
+                      ? null
+                      : () => _doSave(context, ref, notifier),
+                  icon: editorState.isSaving
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.save_outlined, size: 16),
+                  label: const Text('Save'),
+                ),
+                const SizedBox(width: 6),
+                FilledButton.icon(
+                  onPressed: editorState.isBusy
+                      ? null
+                      : () => _doPublish(context, ref, notifier),
+                  icon: editorState.isPublishing
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.cloud_upload_outlined, size: 16),
+                  label: const Text('Publish'),
+                ),
+              ] else
+                FilledButton.icon(
+                  onPressed: editorState.isBusy
+                      ? null
+                      : () => _doSave(context, ref, notifier),
+                  icon: editorState.isSaving
+                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.save, size: 16),
+                  label: const Text('Save'),
+                ),
               const SizedBox(width: 8),
             ],
           ),
@@ -144,11 +179,40 @@ class _EditorBody extends ConsumerWidget {
     );
   }
 
+  Future<void> _doSave(BuildContext context, WidgetRef ref, ScenarioEditor notifier) async {
+    final ok = await notifier.save();
+    if (!context.mounted) return;
+    if (ok) {
+      final warning = ref.read(scenarioEditorProvider(initialScenario)).syncWarning;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(warning ?? 'Saved locally.'),
+          backgroundColor: warning != null ? Theme.of(context).colorScheme.errorContainer : null,
+        ),
+      );
+    }
+  }
+
+  Future<void> _doPublish(BuildContext context, WidgetRef ref, ScenarioEditor notifier) async {
+    final ok = await notifier.saveAndPublish();
+    if (!context.mounted) return;
+    if (ok) {
+      final warning = ref.read(scenarioEditorProvider(initialScenario)).syncWarning;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(warning ?? 'Published to server.'),
+          backgroundColor: warning != null ? Theme.of(context).colorScheme.errorContainer : null,
+        ),
+      );
+    }
+  }
+
   Future<void> _export(BuildContext context, WidgetRef ref, Scenario scenario) async {
     final service = FileImportExportService();
     final path = await service.pickJsonFileToExport('${scenario.id}_v${scenario.version}.json');
     if (path == null) return;
-    final repo = ref.read(scenarioRepositoryProvider);
+    // Cast is safe: on desktop the provider always returns ScenarioRepository.
+    final repo = ref.read(scenarioRepositoryProvider) as ScenarioRepository;
     await repo.exportToFile(scenario, path);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Exported to $path')));

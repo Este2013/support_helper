@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../providers/settings_provider.dart';
 import '../../providers/tab_providers.dart';
+import '../../providers/scenario_providers.dart';
 import '../home/home_screen.dart';
 import '../editor/editor_shell.dart';
+import '../settings/settings_dialog.dart';
 
 class AppShell extends ConsumerStatefulWidget {
   /// The child widget provided by GoRouter for the currently matched route.
@@ -21,6 +24,15 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    // Eagerly load settings (including token from platform secure storage) on
+    // the first frame so the startup sync has credentials available immediately.
+    ref.watch(appSettingsNotifierProvider);
+
+    // Trigger the startup sync once. The provider is keepAlive so it only
+    // fires one pull per app session. Result is intentionally ignored here
+    // — success invalidates the scenario list providers automatically.
+    ref.watch(scenarioStartupSyncProvider);
+
     final tabs = ref.watch(openTabsProvider);
     final location = GoRouterState.of(context).uri.toString();
 
@@ -46,6 +58,17 @@ class _AppShellState extends ConsumerState<AppShell> {
               if (index == 1) context.go('/editor');
             },
             labelType: NavigationRailLabelType.all,
+            trailing: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: IconButton(
+                icon: const Icon(Icons.settings_outlined),
+                tooltip: 'Settings',
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (_) => const SettingsDialog(),
+                ),
+              ),
+            ),
             destinations: const [
               NavigationRailDestination(
                 icon: Icon(Icons.home_outlined),

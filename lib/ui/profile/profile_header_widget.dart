@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:markdown_editor_plus/markdown_editor_plus.dart';
 import '../../data/models/profile/customer_profile.dart';
 import '../../providers/profile_providers.dart';
+import '../../providers/settings_provider.dart';
 import '../../providers/tab_providers.dart';
 
 class ProfileHeaderWidget extends ConsumerStatefulWidget {
@@ -72,6 +73,7 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
         .read(openTabsProvider.notifier)
         .updateDisplayName(widget.profile.id, name);
     setState(() => _editingName = false);
+    _pushProfile(updated);
   }
 
   Future<void> _saveNotes() async {
@@ -89,6 +91,21 @@ class _ProfileHeaderWidgetState extends ConsumerState<ProfileHeaderWidget> {
     // _notesDirty will be cleared by didUpdateWidget when the new profile
     // propagates back, but clear it immediately for snappy UI feedback.
     setState(() => _notesDirty = false);
+    _pushProfile(updated);
+  }
+
+  /// Best-effort server push when profile sync is enabled and role is editor.
+  /// Fire-and-forget — failures are silently ignored.
+  Future<void> _pushProfile(CustomerProfile profile) async {
+    final settings = ref.read(appSettingsNotifierProvider).valueOrNull;
+    if (settings == null || !settings.hasServer ||
+        !settings.syncProfilesEnabled || !settings.canPush) return;
+    try {
+      final syncService = ref.read(profileSyncServiceProvider);
+      await syncService?.push(profile);
+    } catch (_) {
+      // Silently ignore — data is already saved locally.
+    }
   }
 
   @override

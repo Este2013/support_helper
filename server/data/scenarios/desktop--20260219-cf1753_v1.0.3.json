@@ -1,0 +1,61 @@
+{
+  "id": "desktop--20260219-cf1753",
+  "name": "CH - AI Effects",
+  "description": "A deep dive in the NVIDIA effects for Camera Hub.",
+  "version": "1.0.3",
+  "author": "Esteban Aragon",
+  "questions": [
+    {
+      "id": "q_8ed2e833",
+      "title": "What OS is the customer using?",
+      "notes": "",
+      "answers": [
+        {
+          "label": "Windows",
+          "destination": {
+            "type": "question",
+            "questionId": "q_057f1365"
+          }
+        },
+        {
+          "label": "macOS",
+          "destination": {
+            "type": "end_with_notes",
+            "notes": "The effects are only available for Windows."
+          }
+        },
+        {
+          "label": "Linux",
+          "destination": {
+            "type": "end"
+          }
+        }
+      ],
+      "externalLinks": []
+    },
+    {
+      "id": "q_057f1365",
+      "title": "Does the customer have a compatible NVIDIA GPU?",
+      "notes": "To know if that is the case, follow the guide: [Is the NVIDIA GPU compatible?](https://elgato.atlassian.net/wiki/x/AQD8xQ)",
+      "answers": [
+        {
+          "label": "Yes",
+          "destination": {
+            "type": "end"
+          }
+        },
+        {
+          "label": "No",
+          "destination": {
+            "type": "end_with_notes",
+            "notes": "Unless a compatible GPU is connected, this will not work :("
+          }
+        }
+      ],
+      "externalLinks": []
+    }
+  ],
+  "createdAt": "2026-02-19T15:41:07.510167",
+  "updatedAt": "2026-02-19T17:11:15.454794",
+  "source": "local"
+}

@@ -1,5 +1,10 @@
 import 'question.dart';
 
+/// Whether this scenario was created locally or pulled from a remote server.
+/// Stored in the JSON file so the origin is known across restarts.
+/// Old files without a [source] key default to [ScenarioSource.local].
+enum ScenarioSource { local, remote }
+
 class Scenario {
   final String id;
   final String name;
@@ -9,6 +14,9 @@ class Scenario {
   final List<Question> questions;
   final DateTime createdAt;
   final DateTime updatedAt;
+  /// Origin of this scenario. Defaults to [ScenarioSource.local] for all
+  /// existing files (backward-compatible — missing key → 'local').
+  final ScenarioSource source;
 
   const Scenario({
     required this.id,
@@ -19,6 +27,7 @@ class Scenario {
     this.questions = const [],
     required this.createdAt,
     required this.updatedAt,
+    this.source = ScenarioSource.local,
   });
 
   factory Scenario.fromJson(Map<String, dynamic> json) => Scenario(
@@ -32,6 +41,9 @@ class Scenario {
             .toList(),
         createdAt: DateTime.parse(json['createdAt'] as String),
         updatedAt: DateTime.parse(json['updatedAt'] as String),
+        source: ScenarioSource.values.byName(
+          json['source'] as String? ?? ScenarioSource.local.name,
+        ),
       );
 
   Map<String, dynamic> toJson() => {
@@ -43,6 +55,7 @@ class Scenario {
         'questions': questions.map((q) => q.toJson()).toList(),
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
+        'source': source.name,
       };
 
   Scenario copyWith({
@@ -54,6 +67,7 @@ class Scenario {
     List<Question>? questions,
     DateTime? createdAt,
     DateTime? updatedAt,
+    ScenarioSource? source,
   }) =>
       Scenario(
         id: id ?? this.id,
@@ -64,6 +78,7 @@ class Scenario {
         questions: questions ?? this.questions,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
+        source: source ?? this.source,
       );
 
   /// Returns null if scenario is valid, otherwise an error message.

@@ -1,4 +1,5 @@
 import 'scenario_session.dart';
+import '../scenario/scenario.dart' show ScenarioSource;
 
 class CustomerProfile {
   final String id;
@@ -8,6 +9,10 @@ class CustomerProfile {
   final List<ScenarioSession> sessions;
   final DateTime createdAt;
   final DateTime updatedAt;
+  /// Origin of this profile. Defaults to [ScenarioSource.local] for all
+  /// existing files (backward-compatible — missing key → 'local').
+  /// Reuses [ScenarioSource] since the semantics are identical.
+  final ScenarioSource source;
 
   const CustomerProfile({
     required this.id,
@@ -17,6 +22,7 @@ class CustomerProfile {
     this.sessions = const [],
     required this.createdAt,
     required this.updatedAt,
+    this.source = ScenarioSource.local,
   });
 
   factory CustomerProfile.fromJson(Map<String, dynamic> json) =>
@@ -32,6 +38,9 @@ class CustomerProfile {
             .toList(),
         createdAt: DateTime.parse(json['createdAt'] as String),
         updatedAt: DateTime.parse(json['updatedAt'] as String),
+        source: ScenarioSource.values.byName(
+          json['source'] as String? ?? ScenarioSource.local.name,
+        ),
       );
 
   Map<String, dynamic> toJson() => {
@@ -42,6 +51,7 @@ class CustomerProfile {
         'sessions': sessions.map((s) => s.toJson()).toList(),
         'createdAt': createdAt.toIso8601String(),
         'updatedAt': updatedAt.toIso8601String(),
+        'source': source.name,
       };
 
   CustomerProfile copyWith({
@@ -52,6 +62,7 @@ class CustomerProfile {
     List<ScenarioSession>? sessions,
     DateTime? createdAt,
     DateTime? updatedAt,
+    ScenarioSource? source,
   }) =>
       CustomerProfile(
         id: id ?? this.id,
@@ -61,6 +72,7 @@ class CustomerProfile {
         sessions: sessions ?? this.sessions,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
+        source: source ?? this.source,
       );
 
   ScenarioSession? sessionById(String sessionId) {

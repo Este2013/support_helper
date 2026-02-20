@@ -7,7 +7,16 @@
       "Bash(flutter analyze:*)",
       "Bash(flutter build:*)",
       "Bash(findstr /i \"uuid crypto\" \"C:\\\\PROJECTS\\\\support_helper\\\\pubspec.yaml\")",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(dir \"%APPDATA%\\\\support_helper\"\")",
+      "Bash(dir \"%APPDATA%\\\\support_helper\")",
+      "Bash(echo:*)",
+      "Bash(cmdkey /list)",
+      "Bash(more:*)",
+      "Bash(powershell:*)",
+      "Bash(dir:*)",
+      "Bash(flutter pub cache:*)"
     ]
   }
 }

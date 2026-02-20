@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
+import '../data/datasources/scenario_data_source.dart';
 import '../data/models/scenario/scenario.dart';
 import '../data/models/scenario/question.dart';
 import '../data/models/scenario/answer.dart';
 import '../data/models/scenario/external_link.dart';
-import '../data/repositories/scenario_repository.dart';
 import 'scenario_providers.dart';
+import 'settings_provider.dart';
 
 part 'editor_providers.g.dart';
 
@@ -13,9 +14,20 @@ class ScenarioEditorState {
   final Scenario draft;
   final bool isDirty;
   final String? validationError;
+
+  /// True while the published file is being written (Save in progress).
   final bool isSaving;
+
   /// True while the background draft file is being written.
   final bool isDraftSaving;
+
+  /// True while the server push is in progress (Publish in progress).
+  /// Can be true independently of [isSaving] (publish starts after local save).
+  final bool isPublishing;
+
+  /// Non-null when the local save succeeded but the server push failed.
+  /// Shown as a non-blocking warning snackbar in the editor UI.
+  final String? syncWarning;
 
   const ScenarioEditorState({
     required this.draft,
@@ -23,7 +35,13 @@ class ScenarioEditorState {
     this.validationError,
     this.isSaving = false,
     this.isDraftSaving = false,
+    this.isPublishing = false,
+    this.syncWarning,
   });
+
+  /// True while any async operation (save or publish) is in progress.
+  /// Used to disable action buttons to prevent double-submits.
+  bool get isBusy => isSaving || isPublishing;
 
   ScenarioEditorState copyWith({
     Scenario? draft,
@@ -32,6 +50,9 @@ class ScenarioEditorState {
     bool clearValidationError = false,
     bool? isSaving,
     bool? isDraftSaving,
+    bool? isPublishing,
+    String? syncWarning,
+    bool clearSyncWarning = false,
   }) =>
       ScenarioEditorState(
         draft: draft ?? this.draft,
@@ -41,6 +62,10 @@ class ScenarioEditorState {
             : (validationError ?? this.validationError),
         isSaving: isSaving ?? this.isSaving,
         isDraftSaving: isDraftSaving ?? this.isDraftSaving,
+        isPublishing: isPublishing ?? this.isPublishing,
+        syncWarning: clearSyncWarning
+            ? null
+            : (syncWarning ?? this.syncWarning),
       );
 }
 
@@ -57,13 +82,11 @@ class ScenarioEditor extends _$ScenarioEditor {
   ScenarioEditorState build(Scenario initialScenario) {
     // Cancel any pending draft write when the provider is disposed.
     ref.onDispose(() => _draftTimer?.cancel());
-    // If we opened with a draft already loaded, consider the version already
-    // bumped so we don't increment it again on the next keystroke.
     _versionBumped = false;
     return ScenarioEditorState(draft: initialScenario);
   }
 
-  ScenarioRepository get _repo => ref.read(scenarioRepositoryProvider);
+  ScenarioDataSource get _repo => ref.read(scenarioRepositoryProvider);
 
   // ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -80,8 +103,8 @@ class ScenarioEditor extends _$ScenarioEditor {
   }
 
   /// Marks the draft dirty and schedules a debounced draft file write.
-  /// On the very first edit of a previously-published scenario (startDirty
-  /// was false when the editor opened), bumps the patch version once.
+  /// On the very first edit of a previously-published scenario, bumps the patch
+  /// version once.
   void _markDirty(Scenario newDraft) {
     Scenario draft = newDraft;
     if (!_versionBumped && !state.isDirty) {
@@ -96,12 +119,8 @@ class ScenarioEditor extends _$ScenarioEditor {
     _scheduleDraftSave();
   }
 
-  /// Whether we have written the draft at least once this session.
-  /// Used to invalidate the list provider the first time so new scenarios
-  /// (which have no published file) appear immediately in the scenario list.
   bool _draftWrittenOnce = false;
 
-  /// Debounces draft persistence: waits 800 ms after the last change.
   void _scheduleDraftSave() {
     _draftTimer?.cancel();
     _draftTimer = Timer(const Duration(milliseconds: 800), _writeDraft);
@@ -111,9 +130,6 @@ class ScenarioEditor extends _$ScenarioEditor {
     state = state.copyWith(isDraftSaving: true);
     try {
       await _repo.saveDraft(state.draft);
-      // On the first write, refresh the scenario list so that orphan drafts
-      // (brand-new scenarios never yet published) appear immediately without
-      // requiring an app restart.
       if (!_draftWrittenOnce) {
         _draftWrittenOnce = true;
         ref.invalidate(scenarioListWithStatusProvider);
@@ -125,11 +141,8 @@ class ScenarioEditor extends _$ScenarioEditor {
 
   // ── Called by _EditorBody when a draft was loaded on open ─────────────────
 
-  /// Marks the state dirty without touching the draft file — used when the
-  /// editor was opened and a pre-existing draft was loaded as the initial state.
   void markDirtyFromDraft() {
-    if (state.isDirty) return; // already dirty, nothing to do
-    // Draft was created in a previous session — version already bumped then.
+    if (state.isDirty) return;
     _versionBumped = true;
     state = state.copyWith(isDirty: true);
   }
@@ -149,12 +162,7 @@ class ScenarioEditor extends _$ScenarioEditor {
     ));
   }
 
-  /// Updates the version string explicitly (called when the user edits the
-  /// Major or Minor fields). Marks [_versionBumped] so the automatic patch
-  /// increment does not fire on top of the user's intentional change.
   void updateVersion(String version) {
-    // Treat a manual version edit the same as "already bumped" so _markDirty
-    // does not increment the patch a second time.
     _versionBumped = true;
     _markDirty(state.draft.copyWith(
       version: version,
@@ -186,14 +194,12 @@ class ScenarioEditor extends _$ScenarioEditor {
     ));
   }
 
-  /// Move a question to a different folder (or '' to remove from all folders).
   void moveQuestionToFolder(String questionId, String folder) {
     final q = state.draft.questionById(questionId);
     if (q == null) return;
     updateQuestion(questionId, q.copyWith(folder: folder));
   }
 
-  /// Rename every question whose folder == oldName to newName.
   void renameFolder(String oldName, String newName) {
     final trimmed = newName.trim();
     if (trimmed == oldName) return;
@@ -206,7 +212,6 @@ class ScenarioEditor extends _$ScenarioEditor {
     ));
   }
 
-  /// Delete a folder — moves all its questions to the root folder ('').
   void deleteFolder(String name) => renameFolder(name, '');
 
   void reorderQuestions(int oldIndex, int newIndex) {
@@ -270,10 +275,13 @@ class ScenarioEditor extends _$ScenarioEditor {
               ..removeAt(index)));
   }
 
-  // ── Publish (Save button) ──────────────────────────────────────────────────
+  // ── Save (local-only) ──────────────────────────────────────────────────────
 
+  /// Saves the scenario to local disk only. The draft file is deleted.
+  /// Does NOT push to the server — use [saveAndPublish] for that.
+  ///
+  /// Returns true on success, false if validation failed or the write errored.
   Future<bool> save() async {
-    // Cancel any pending debounced draft write.
     _draftTimer?.cancel();
     _draftTimer = null;
 
@@ -282,7 +290,7 @@ class ScenarioEditor extends _$ScenarioEditor {
       state = state.copyWith(validationError: error);
       return false;
     }
-    state = state.copyWith(isSaving: true);
+    state = state.copyWith(isSaving: true, clearSyncWarning: true);
     try {
       await _repo.save(state.draft);
       ref.invalidate(scenarioListProvider);
@@ -292,11 +300,56 @@ class ScenarioEditor extends _$ScenarioEditor {
         isSaving: false,
         clearValidationError: true,
       );
-      return true;
     } catch (e) {
       state = state.copyWith(
           validationError: 'Save failed: $e', isSaving: false);
       return false;
     }
+
+    return true;
+  }
+
+  // ── Save + Publish (local save then server push) ───────────────────────────
+
+  /// Saves locally (same as [save]) then pushes to the server.
+  ///
+  /// On successful push: updates [draft.source] to [ScenarioSource.remote]
+  /// and persists that change locally so the Server chip appears immediately.
+  ///
+  /// On push failure: returns true (local save succeeded) but sets
+  /// [syncWarning] with an error message — non-blocking.
+  ///
+  /// Returns false only when the local save itself fails (validation or I/O).
+  Future<bool> saveAndPublish() async {
+    // Phase 1: local save (reuse existing logic).
+    final localOk = await save();
+    if (!localOk) return false;
+
+    // Phase 2: server push.
+    final syncService = ref.read(scenarioSyncServiceProvider);
+    if (syncService == null) {
+      // No server configured — treat as a plain local save.
+      return true;
+    }
+
+    state = state.copyWith(isPublishing: true, clearSyncWarning: true);
+    try {
+      await syncService.push(state.draft);
+
+      // Mark the scenario as remote-origin and re-save so the chip updates.
+      final published = state.draft.copyWith(source: ScenarioSource.remote);
+      await _repo.save(published);
+      ref.invalidate(scenarioListProvider);
+      ref.invalidate(scenarioListWithStatusProvider);
+      ref.invalidate(scenarioRemoteMetaProvider);
+      state = state.copyWith(draft: published, isPublishing: false);
+    } catch (e) {
+      state = state.copyWith(
+        isPublishing: false,
+        syncWarning: 'Saved locally. Server push failed: $e',
+      );
+    }
+
+    return true;
   }
 }

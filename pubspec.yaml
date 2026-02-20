@@ -23,6 +23,7 @@ dependencies:
   # Storage
   path_provider: ^2.1.5
   path: ^1.9.1
+  flutter_secure_storage: ^9.2.2
 
   # File picking
   file_picker: ^8.1.6
@@ -30,6 +31,9 @@ dependencies:
   # Markdown
   flutter_markdown: ^0.7.6
   markdown_editor_plus: ^0.2.15
+
+  # HTTP client for server sync
+  http: ^1.2.2
 
   # IDs
   uuid: ^4.5.1

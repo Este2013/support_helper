@@ -2,11 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../data/models/scenario/scenario.dart';
+import '../../data/repositories/scenario_repository.dart';
 import '../../data/services/file_import_export_service.dart';
 import '../../providers/scenario_providers.dart';
+import '../../providers/settings_provider.dart';
 import '../shared/loading_widget.dart';
 import '../shared/error_widget.dart';
 import '../shared/confirm_dialog.dart';
+
+// Convenience typedef for the extended list-entry record.
+typedef _Entry = ({
+  Scenario scenario,
+  bool hasDraft,
+  bool publishedExists,
+  bool remoteExists,
+  bool remoteIsNewer,
+});
 
 class ScenarioListPanel extends ConsumerWidget {
   const ScenarioListPanel({super.key});
@@ -21,10 +32,8 @@ class ScenarioListPanel extends ConsumerWidget {
           error: e,
           onRetry: () => ref.invalidate(scenarioListWithStatusProvider)),
       data: (entries) {
-        // Group by scenario id; each group collects all (version, hasDraft,
-        // publishedExists) tuples for that id.
-        final grouped =
-            <String, List<({Scenario scenario, bool hasDraft, bool publishedExists})>>{};
+        // Group by scenario id.
+        final grouped = <String, List<_Entry>>{};
         for (final e in entries) {
           grouped.putIfAbsent(e.scenario.id, () => []).add(e);
         }
@@ -87,7 +96,8 @@ class ScenarioListPanel extends ConsumerWidget {
     final path = await service.pickJsonFileToImport();
     if (path == null) return;
     try {
-      final repo = ref.read(scenarioRepositoryProvider);
+      // Cast is safe: on desktop the provider always returns ScenarioRepository.
+      final repo = ref.read(scenarioRepositoryProvider) as ScenarioRepository;
       final s = await repo.importFromFile(path);
       ref.invalidate(scenarioListWithStatusProvider);
       if (context.mounted) {
@@ -140,7 +150,7 @@ class ScenarioListPanel extends ConsumerWidget {
 
 class _ScenarioGroup extends StatefulWidget {
   final String scenarioId;
-  final List<({Scenario scenario, bool hasDraft, bool publishedExists})> versions;
+  final List<_Entry> versions;
   final void Function(Scenario) onDeletePublished;
   final void Function(Scenario) onDeleteDraft;
 
@@ -158,8 +168,6 @@ class _ScenarioGroup extends StatefulWidget {
 class _ScenarioGroupState extends State<_ScenarioGroup> {
   bool _showAllVersions = false;
 
-  /// Compares two version strings numerically segment-by-segment.
-  /// Returns > 0 if [a] is newer, < 0 if [b] is newer, 0 if equal.
   static int _compareVersions(String a, String b) {
     final pa = a.split('.').map((s) => int.tryParse(s) ?? 0).toList();
     final pb = b.split('.').map((s) => int.tryParse(s) ?? 0).toList();
@@ -175,11 +183,8 @@ class _ScenarioGroupState extends State<_ScenarioGroup> {
   @override
   Widget build(BuildContext context) {
     final groupName = widget.versions.first.scenario.name;
-
-    // Sort descending — newest first.
     final sorted = [...widget.versions]..sort(
         (a, b) => _compareVersions(b.scenario.version, a.scenario.version));
-
     final latest = sorted.first;
     final older = sorted.skip(1).toList();
     final hasOlder = older.isNotEmpty;
@@ -189,7 +194,6 @@ class _ScenarioGroupState extends State<_ScenarioGroup> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Group header ──────────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text(
@@ -200,13 +204,11 @@ class _ScenarioGroupState extends State<_ScenarioGroup> {
                   ?.copyWith(fontWeight: FontWeight.bold),
             ),
           ),
-          // ── Latest version ────────────────────────────────────────────────
           _ScenarioVersionTile(
             entry: latest,
             onDeletePublished: widget.onDeletePublished,
             onDeleteDraft: widget.onDeleteDraft,
           ),
-          // ── Older versions (collapsed by default) ─────────────────────────
           if (hasOlder) ...[
             InkWell(
               onTap: () => setState(() => _showAllVersions = !_showAllVersions),
@@ -251,8 +253,8 @@ class _ScenarioGroupState extends State<_ScenarioGroup> {
 
 // ── Single version row ───────────────────────────────────────────────────────
 
-class _ScenarioVersionTile extends ConsumerWidget {
-  final ({Scenario scenario, bool hasDraft, bool publishedExists}) entry;
+class _ScenarioVersionTile extends ConsumerStatefulWidget {
+  final _Entry entry;
   final void Function(Scenario) onDeletePublished;
   final void Function(Scenario) onDeleteDraft;
 
@@ -262,20 +264,39 @@ class _ScenarioVersionTile extends ConsumerWidget {
     required this.onDeleteDraft,
   });
 
+  @override
+  ConsumerState<_ScenarioVersionTile> createState() =>
+      _ScenarioVersionTileState();
+}
+
+class _ScenarioVersionTileState extends ConsumerState<_ScenarioVersionTile> {
+  bool _isLoading = false;
+
+  _Entry get entry => widget.entry;
+
   String _editorPath(Scenario s) =>
       '/editor/${Uri.encodeComponent(s.id)}/${Uri.encodeComponent(s.version)}';
 
-  /// Tapping when both a published file AND a draft exist: ask the user
-  /// whether to resume the draft or start fresh from the published version.
-  Future<void> _handleTap(BuildContext context, WidgetRef ref) async {
+  // ── Tap handlers ────────────────────────────────────────────────────────────
+
+  /// Primary tap: online-first if remote exists, draft-resume if draft exists.
+  Future<void> _handleTap() async {
     final s = entry.scenario;
-    // Orphan draft or no draft — go straight in.
-    if (!entry.hasDraft || !entry.publishedExists) {
-      context.go(_editorPath(s));
+
+    // Remote-only stub (no local copy, no draft) — download first.
+    if (!entry.publishedExists && !entry.hasDraft && entry.remoteExists) {
+      await _downloadAndEdit(s);
       return;
     }
 
-    // Both exist — show the choice dialog.
+    // Orphan draft or no draft, no remote overlap → go straight in.
+    if (!entry.hasDraft || !entry.publishedExists) {
+      if (mounted) context.go(_editorPath(s));
+      return;
+    }
+
+    // Both draft and published exist — ask.
+    if (!mounted) return;
     final resume = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -286,7 +307,7 @@ class _ScenarioVersionTile extends ConsumerWidget {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(ctx).pop(null), // cancel
+            onPressed: () => Navigator.of(ctx).pop(null),
             child: const Text('Cancel'),
           ),
           OutlinedButton.icon(
@@ -303,76 +324,269 @@ class _ScenarioVersionTile extends ConsumerWidget {
       ),
     );
 
-    if (resume == null || !context.mounted) return;
+    if (resume == null || !mounted) return;
 
     if (!resume) {
-      // Discard the draft, then open the published version.
       final repo = ref.read(scenarioRepositoryProvider);
       await repo.deleteDraft(s.id, s.version);
       ref.invalidate(scenarioListWithStatusProvider);
     }
-    if (context.mounted) context.go(_editorPath(s));
+    if (mounted) context.go(_editorPath(s));
   }
 
+  /// "Open from server" — pulls the remote version, overwrites local, opens editor.
+  /// Falls back to the local copy if the network request fails.
+  Future<void> _openFromServer() async {
+    final s = entry.scenario;
+    final syncService = ref.read(scenarioSyncServiceProvider);
+    if (syncService == null) {
+      if (mounted) context.go(_editorPath(s));
+      return;
+    }
+
+    // If already in sync (same updatedAt), skip the network round-trip.
+    if (entry.publishedExists && !entry.remoteIsNewer) {
+      if (mounted) context.go(_editorPath(s));
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      final remote = await syncService.fetchOne(s.id, s.version);
+      await ref.read(scenarioRepositoryProvider).save(remote);
+      ref.invalidate(scenarioListProvider);
+      ref.invalidate(scenarioListWithStatusProvider);
+      if (mounted) context.go(_editorPath(remote));
+    } catch (_) {
+      // Network failed — fall back to local copy.
+      if (mounted) context.go(_editorPath(s));
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// "Download to edit" — used for remote-only stubs (no local file at all).
+  Future<void> _downloadAndEdit(Scenario stub) async {
+    final syncService = ref.read(scenarioSyncServiceProvider);
+    if (syncService == null) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final remote = await syncService.fetchOne(stub.id, stub.version);
+      await ref.read(scenarioRepositoryProvider).save(remote);
+      ref.invalidate(scenarioListProvider);
+      ref.invalidate(scenarioListWithStatusProvider);
+      if (mounted) context.go(_editorPath(remote));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// Publish an orphan draft to the server.
+  Future<void> _publishDraft() async {
+    final s = entry.scenario;
+    final repo = ref.read(scenarioRepositoryProvider);
+    final syncService = ref.read(scenarioSyncServiceProvider);
+    if (syncService == null) return;
+
+    setState(() => _isLoading = true);
+    try {
+      // The draft IS the only copy; load it explicitly.
+      final draft = await repo.loadDraft(s.id, s.version) ?? s;
+
+      // Publish locally first (writes published file, deletes draft).
+      final published = draft.copyWith(source: ScenarioSource.remote);
+      await repo.save(published);
+
+      // Push to server.
+      await syncService.push(published);
+
+      ref.invalidate(scenarioListProvider);
+      ref.invalidate(scenarioListWithStatusProvider);
+      ref.invalidate(scenarioRemoteMetaProvider);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Published to server.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Publish failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // ── Build ───────────────────────────────────────────────────────────────────
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final s = entry.scenario;
     final colorScheme = Theme.of(context).colorScheme;
-    final isOrphanDraft = !entry.publishedExists;
+    final isOrphanDraft = !entry.publishedExists && entry.hasDraft;
+    final isRemoteOnly = !entry.publishedExists && !entry.hasDraft && entry.remoteExists;
+    final settings = ref.watch(appSettingsNotifierProvider).valueOrNull;
+    final canPush = settings?.canPush == true && settings?.hasServer == true;
+
+    Widget titleRow = Row(
+      children: [
+        Text('v${s.version}'),
+        const SizedBox(width: 8),
+        // Draft chip
+        if (entry.hasDraft)
+          _chip(
+            icon: Icons.edit_note,
+            label: isOrphanDraft ? 'Unpublished Draft' : 'Draft',
+            background: colorScheme.tertiaryContainer,
+            foreground: colorScheme.onTertiaryContainer,
+          ),
+        // Server chip
+        if (s.source == ScenarioSource.remote || entry.remoteExists) ...[
+          if (entry.hasDraft) const SizedBox(width: 4),
+          _chip(
+            icon: Icons.cloud_outlined,
+            label: 'Server',
+            background: colorScheme.secondaryContainer,
+            foreground: colorScheme.onSecondaryContainer,
+          ),
+        ],
+      ],
+    );
+
+    // Subtitle line — varies by scenario state.
+    final String subtitleText;
+    if (isRemoteOnly) {
+      subtitleText = 'On server — not downloaded yet';
+    } else if (entry.remoteIsNewer && entry.publishedExists) {
+      subtitleText = '↑ Newer version on server';
+    } else {
+      subtitleText = '${s.questions.length} questions'
+          '${s.author.isNotEmpty ? ' • ${s.author}' : ''}';
+    }
+
+    Widget subtitle = Text(
+      subtitleText,
+      style: (entry.remoteIsNewer && entry.publishedExists)
+          ? TextStyle(color: colorScheme.primary, fontSize: 12)
+          : null,
+    );
+
+    // Trailing buttons — vary based on state.
+    final trailing = _isLoading
+        ? const SizedBox(
+            width: 20, height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2))
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Remote-only: "Download to edit" is the primary action.
+              if (isRemoteOnly)
+                IconButton(
+                  icon: Icon(Icons.cloud_download_outlined,
+                      size: 18, color: colorScheme.primary),
+                  tooltip: 'Download and edit',
+                  onPressed: () => _downloadAndEdit(s),
+                )
+
+              // Both local + remote: primary = open from server; secondary = edit local.
+              else if (entry.remoteExists && entry.publishedExists) ...[
+                IconButton(
+                  icon: Icon(Icons.cloud_sync_outlined,
+                      size: 18, color: colorScheme.primary),
+                  tooltip: 'Open from server'
+                      '${entry.remoteIsNewer ? ' (newer)' : ''}',
+                  onPressed: () => _openFromServer(),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  tooltip: 'Edit local copy',
+                  onPressed: () => _openLocalOnly(),
+                ),
+              ]
+
+              // Local-only (no remote) — standard edit button.
+              else
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  onPressed: _handleTap,
+                  tooltip: isOrphanDraft ? 'Continue editing draft' : 'Edit',
+                ),
+
+              // Publish button for orphan drafts (editor role only).
+              if (isOrphanDraft && canPush)
+                IconButton(
+                  icon: Icon(Icons.cloud_upload_outlined,
+                      size: 18, color: colorScheme.primary),
+                  tooltip: 'Publish to server',
+                  onPressed: _publishDraft,
+                ),
+
+              // Discard-draft button (draft + published exist).
+              if (entry.hasDraft && entry.publishedExists)
+                IconButton(
+                  icon: Icon(Icons.undo, size: 18, color: colorScheme.tertiary),
+                  tooltip: 'Discard draft (revert to published)',
+                  onPressed: () => widget.onDeleteDraft(s),
+                ),
+
+              // Delete button — hidden for remote-only stubs (nothing to delete locally).
+              if (!isRemoteOnly)
+                IconButton(
+                  icon: Icon(Icons.delete_outline,
+                      size: 18, color: colorScheme.error),
+                  onPressed: () => isOrphanDraft
+                      ? widget.onDeleteDraft(s)
+                      : widget.onDeletePublished(s),
+                  tooltip: isOrphanDraft ? 'Discard draft' : 'Delete',
+                ),
+            ],
+          );
 
     return ListTile(
-      title: Row(
-        children: [
-          Text('v${s.version}'),
-          const SizedBox(width: 8),
-          if (entry.hasDraft)
-            Chip(
-              label: Text(isOrphanDraft ? 'Unpublished Draft' : 'Draft'),
-              padding: EdgeInsets.zero,
-              labelPadding: const EdgeInsets.symmetric(horizontal: 6),
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              side: BorderSide.none,
-              avatar: Icon(
-                Icons.edit_note,
-                size: 13,
-                color: colorScheme.onTertiaryContainer,
-              ),
-              backgroundColor: colorScheme.tertiaryContainer,
-              labelStyle: TextStyle(
-                color: colorScheme.onTertiaryContainer,
-                fontSize: 11,
-              ),
-            ),
-        ],
-      ),
-      subtitle: Text('${s.questions.length} questions • ${s.author}'),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            onPressed: () => _handleTap(context, ref),
-            tooltip: isOrphanDraft ? 'Continue editing draft' : 'Edit',
-          ),
-          // Discard-draft button — only when a draft exists alongside a
-          // published file (orphan drafts use the delete button instead).
-          if (entry.hasDraft && entry.publishedExists)
-            IconButton(
-              icon: Icon(Icons.undo, size: 18, color: colorScheme.tertiary),
-              tooltip: 'Discard draft (revert to published)',
-              onPressed: () => onDeleteDraft(s),
-            ),
-          IconButton(
-            icon: Icon(Icons.delete_outline,
-                size: 18, color: colorScheme.error),
-            onPressed: () => isOrphanDraft
-                ? onDeleteDraft(s)
-                : onDeletePublished(s),
-            tooltip: isOrphanDraft ? 'Discard draft' : 'Delete',
-          ),
-        ],
-      ),
-      onTap: () => _handleTap(context, ref),
+      title: titleRow,
+      subtitle: subtitle,
+      trailing: trailing,
+      onTap: _isLoading ? null : _handleTap,
+    );
+  }
+
+  // ── Opens the local copy without touching the remote version. ───────────────
+  Future<void> _openLocalOnly() async {
+    final s = entry.scenario;
+    if (!entry.hasDraft || !entry.publishedExists) {
+      if (mounted) context.go(_editorPath(s));
+      return;
+    }
+    // Same draft-resume dialog as the normal tap flow.
+    await _handleTap();
+  }
+
+  // ── Chip helper ─────────────────────────────────────────────────────────────
+  Widget _chip({
+    required IconData icon,
+    required String label,
+    required Color background,
+    required Color foreground,
+  }) {
+    return Chip(
+      label: Text(label),
+      padding: EdgeInsets.zero,
+      labelPadding: const EdgeInsets.symmetric(horizontal: 6),
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      side: BorderSide.none,
+      avatar: Icon(icon, size: 13, color: foreground),
+      backgroundColor: background,
+      labelStyle: TextStyle(color: foreground, fontSize: 11),
     );
   }
 }

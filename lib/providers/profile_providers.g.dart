@@ -180,5 +180,26 @@ class _ProfileByIdProviderElement
   String get profileId => (origin as ProfileByIdProvider).profileId;
 }
 
+String _$profileSyncServiceHash() =>
+    r'b9ad9eb70bf8c853ab872b595722cf026416bc74';
+
+/// Returns a [ProfileSyncService] when a server is configured AND profile sync
+/// is enabled, null otherwise. Kept alive so the [RemoteApiClient] is reused.
+///
+/// Copied from [profileSyncService].
+@ProviderFor(profileSyncService)
+final profileSyncServiceProvider = Provider<ProfileSyncService?>.internal(
+  profileSyncService,
+  name: r'profileSyncServiceProvider',
+  debugGetCreateSourceHash: const bool.fromEnvironment('dart.vm.product')
+      ? null
+      : _$profileSyncServiceHash,
+  dependencies: null,
+  allTransitiveDependencies: null,
+);
+
+@Deprecated('Will be removed in 3.0. Use Ref instead')
+// ignore: unused_element
+typedef ProfileSyncServiceRef = ProviderRef<ProfileSyncService?>;
 // ignore_for_file: type=lint
 // ignore_for_file: subtype_of_sealed_class, invalid_use_of_internal_member, invalid_use_of_visible_for_testing_member, deprecated_member_use_from_same_package
